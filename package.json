@@ -1,0 +1,14 @@
+{
+  "name": "dns-draining-reverse-proxy-demo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local demo: periodic DNS refresh, connection reuse, generation draining, and differentiated resolution/connect timeouts.",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

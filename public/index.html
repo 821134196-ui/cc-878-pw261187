@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DNS 刷新 · 连接复用与优雅排空演示</title>
+    <link rel="stylesheet" href="/__ui/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <div class="eyebrow">Local reverse-proxy failure-domain demo</div>
+        <h1>周期 DNS 反向代理：复用、排空与重试</h1>
+        <p class="subtitle">
+          代理监听 <code id="proxyUrl">127.0.0.1:8080</code>，两个源站分别在本机
+          <strong id="originPortsStatic">:4101 / :4102</strong>。DNS 改记录后，新请求进入新连接代际，旧下载继续在旧连接上结束。
+        </p>
+      </div>
+      <div class="header-status">
+        <span id="globalPill" class="pill pill-neutral">连接中…</span>
+        <a class="quiet-link" href="/who" target="_blank" rel="noreferrer">直接访问 /who ↗</a>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="control-grid" aria-label="演示控制台">
+        <article class="card control-card">
+          <div class="card-head">
+            <h2>1. DNS 源站记录</h2>
+            <span id="dnsStatusPill" class="pill pill-neutral">pending</span>
+          </div>
+          <p id="dnsMessage" class="card-description">等待状态…</p>
+
+          <div class="dns-meta">
+            <div><span>查询名</span><code id="dnsName">_http._tcp.origin.demo.local</code></div>
+            <div><span>内置 DNS</span><code id="dnsServer">127.0.0.1:53530/udp</code></div>
+            <div><span>刷新周期</span><code id="dnsInterval">3000 ms</code></div>
+            <div><span>最近刷新</span><code id="dnsLastTick">—</code></div>
+          </div>
+
+          <div class="countdown" aria-label="距离下次 DNS 刷新">
+            <div id="countdownBar" class="countdown-bar"></div>
+          </div>
+          <div class="countdown-label"><span id="countdownText">—</span><button id="refreshNow" class="btn btn-ghost btn-small" type="button">立即刷新</button></div>
+
+          <div class="button-row">
+            <button id="switchBlue" class="btn btn-blue" type="button">切到 A · <span id="switchBluePort">:4101</span></button>
+            <button id="switchGreen" class="btn btn-teal" type="button">切到 B · <span id="switchGreenPort">:4102</span></button>
+            <button id="switchToggle" class="btn btn-primary" type="button">一键切换</button>
+          </div>
+
+          <fieldset class="fault-fieldset">
+            <legend>解析 / 连接故障注入</legend>
+            <div class="fault-buttons" role="group" aria-label="故障模式">
+              <button class="btn btn-ghost btn-small fault-btn" data-mode="none" type="button">无故障</button>
+              <button class="btn btn-ghost btn-small fault-btn" data-mode="dns-timeout" type="button">部分 DNS 超时</button>
+              <button class="btn btn-ghost btn-small fault-btn" data-mode="conn-refused" type="button">ECONNREFUSED</button>
+              <button class="btn btn-ghost btn-small fault-btn" data-mode="header-timeout" type="button">响应头超时</button>
+            </div>
+            <p id="faultHint" class="fault-hint"></p>
+          </fieldset>
+        </article>
+
+        <article class="card control-card">
+          <div class="card-head">
+            <h2>2. 制造可观察流量</h2>
+            <span class="pill pill-muted">请求都经 :8080 代理</span>
+          </div>
+
+          <div class="scenario">
+            <div>
+              <h3>看连接复用</h3>
+              <p>串行发起 3 个 <code>/who</code>，第 2、3 次应显示相同连接 ID/TCP 源端口与 <strong>reused=true</strong>。</p>
+            </div>
+            <button id="reuseDemo" class="btn btn-good" type="button">连发 3 个请求</button>
+          </div>
+
+          <div class="scenario">
+            <div>
+              <h3>制造多条空闲连接</h3>
+              <p>并发 4 个短请求并等待完成，为排空时“立即销毁空闲连接”准备对象。</p>
+            </div>
+            <button id="warmPool" class="btn btn-ghost" type="button">并发预热</button>
+          </div>
+
+          <div class="scenario">
+            <div>
+              <h3>看旧下载排空</h3>
+              <p>启动约 5.5 秒的 NDJSON 慢下载，然后在中途切到另一个端口。</p>
+            </div>
+            <button id="downloadDemo" class="btn btn-blue" type="button">发起慢下载</button>
+          </div>
+
+          <div class="scenario scenario-highlight">
+            <div>
+              <h3>一键演示：复用池 + 排空 + 新连接</h3>
+              <p>自动回到 A，预热 4 条连接，启动下载，在下载途中切到 B，再发新请求。</p>
+            </div>
+            <button id="guidedDrain" class="btn btn-warning" type="button">运行脚本</button>
+          </div>
+
+          <div class="scenario">
+            <div>
+              <h3>看重试位置</h3>
+              <p>按当前故障模式请求 <code>/who</code>；若为“无故障”，按钮会临时加入 ECONNREFUSED 端点。</p>
+            </div>
+            <button id="retryDemo" class="btn btn-serious" type="button">发起重试演示</button>
+          </div>
+
+          <div id="actionResult" class="action-result" aria-live="polite">尚未执行页面脚本。</div>
+        </article>
+
+        <article class="card control-card guide-card">
+          <div class="card-head"><h2>3. 应该看到什么</h2></div>
+          <ol class="guide-list">
+            <li><span class="guide-dot guide-reuse"></span><div><strong>复用在 Proxy → Origin 的 keep-alive 池里。</strong><br />相同 <code>C…</code> / TCP 源端口会承载多个请求；源站响应头也给出同一个 <code>O…</code> 连接。</div></li>
+            <li><span class="guide-dot guide-drain"></span><div><strong>排空发生在 DNS 切换后的旧代际。</strong><br />空闲 socket 立刻销毁；active 下载不杀，结束后该代际才 closed。</div></li>
+            <li><span class="guide-dot guide-retry"></span><div><strong>重试发生在代理向下一个 SRV/A 结果建连时。</strong><br /><code>DNS_TIMEOUT</code> 是解析阶段；<code>ECONNREFUSED</code> / <code>HEADER_TIMEOUT</code> 是数据面尝试失败。</div></li>
+          </ol>
+          <div class="stats-grid" id="statsGrid"></div>
+        </article>
+      </section>
+
+      <section class="card topology-card">
+        <div class="card-head">
+          <h2>实时拓扑：标记复用、排空与重试的位置</h2>
+          <span id="topologyHint" class="pill pill-muted">每 250 ms 刷新状态</span>
+        </div>
+        <div id="topology" class="topology"></div>
+        <div id="liveRoutes" class="live-routes"></div>
+      </section>
+
+      <section class="panel-grid">
+        <article class="card span-7">
+          <div class="card-head">
+            <h2>请求与尝试</h2>
+            <span class="pill pill-muted">最近请求在前</span>
+          </div>
+          <div id="requestList" class="request-list"></div>
+        </article>
+
+        <article class="card span-5">
+          <div class="card-head">
+            <h2>DNS 答案与连接代际</h2>
+            <span class="pill pill-muted">Agent generation</span>
+          </div>
+          <div id="dnsAnswers" class="dns-answers"></div>
+          <div id="generationList" class="generation-list"></div>
+        </article>
+
+        <article class="card span-7">
+          <div class="card-head">
+            <h2>事件时间线</h2>
+            <div class="filter-row" id="eventFilters" role="group" aria-label="事件过滤">
+              <button class="filter-btn is-active" data-filter="all" type="button">全部</button>
+              <button class="filter-btn" data-filter="reuse" type="button">复用</button>
+              <button class="filter-btn" data-filter="drain" type="button">排空</button>
+              <button class="filter-btn" data-filter="retry" type="button">重试</button>
+              <button class="filter-btn" data-filter="dns" type="button">DNS</button>
+            </div>
+          </div>
+          <div id="eventList" class="event-list" aria-live="polite"></div>
+        </article>
+
+        <article class="card span-5">
+          <div class="card-head">
+            <h2>TCP 连接记录</h2>
+            <span class="pill pill-muted">相同 TCP 源端口可关联两侧</span>
+          </div>
+          <div class="table-wrap">
+            <table class="conn-table">
+              <thead><tr><th>侧</th><th>ID</th><th>归属</th><th>TCP 端口</th><th>状态</th><th>#</th></tr></thead>
+              <tbody id="connectionBody"></tbody>
+            </table>
+          </div>
+        </article>
+      </section>
+
+      <footer class="footer-note">
+        <h2>语义说明</h2>
+        <div class="footer-grid">
+          <p><strong>周期刷新：</strong>代理每 3 秒向进程内演示 DNS 查询 SRV，再解析每个 target 的 A 记录；控制面改记录后也可手动立即刷新。</p>
+          <p><strong>优雅排空：</strong>端点集合变化才新建 Agent。旧 Agent 的 free socket 立即 destroy，active request 继续；响应结束后 socket 关闭且代际注销。</p>
+          <p><strong>可区分超时：</strong><code>DNS_TIMEOUT</code> 表示某个解析结果无响应但其他 A/SRV 结果可用；<code>HEADER_TIMEOUT</code> 表示 TCP 已连到 tarpit 但没有 HTTP 响应头。</p>
+          <p><strong>安全重试：</strong>仅对 GET/HEAD/OPTIONS 且响应头尚未发送时尝试下一个端点；流式响应一旦开始就不能换源重发。</p>
+        </div>
+      </footer>
+    </main>
+
+    <script src="/__ui/app.js" defer></script>
+  </body>
+</html>
